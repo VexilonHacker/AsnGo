@@ -13,6 +13,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+
+	"github.com/yl2chen/cidranger"
 )
 
 const (
@@ -24,6 +26,10 @@ const (
 )
 
 var asnDataDir string
+
+var ranger cidranger.Ranger
+
+var rangerLoaded bool
 
 const banner = `
        d8888                                     
@@ -38,17 +44,19 @@ d88P     888  88888P' 888  888  "Y88888  "Y88P"
                                Y8b d88P          
                                 "Y88P"
 
-                                 Made by VexilonHacker
+                                 Made by VexilonHacker (⌐■_■)
 `
 
 type ASNJSON struct {
-	ASN         int    `json:"asn"`
-	Handle      string `json:"handle"`
-	Description string `json:"description"`
-	Subnets     struct {
+	ASN      int `json:"asn"`
+	Metadata struct {
+		Handle      string `json:"handle"`
+		Description string `json:"description"`
+	} `json:"metadata"`
+	Prefixes struct {
 		IPv4 []string `json:"ipv4"`
 		IPv6 []string `json:"ipv6"`
-	} `json:"subnets"`
+	} `json:"prefixes"`
 }
 
 type ASNInfo struct {
@@ -57,6 +65,16 @@ type ASNInfo struct {
 	Description string   `json:"description"`
 	Prefixes    []string `json:"prefixes,omitempty"`
 	IP          string   `json:"ip,omitempty"`
+}
+
+type ASNEntry struct {
+	network net.IPNet
+	asn     string
+	desc    string
+}
+
+func (e ASNEntry) Network() net.IPNet {
+	return e.network
 }
 
 func printBannerAndMsg() {
@@ -73,6 +91,46 @@ func isTerminal() bool {
 	return (fi.Mode() & os.ModeCharDevice) != 0
 }
 
+func buildRanger() error {
+	ranger = cidranger.NewPCTrieRanger()
+
+	asnDirs, err := os.ReadDir(asnDataDir)
+	if err != nil {
+		return err
+	}
+
+	for _, d := range asnDirs {
+		if !d.IsDir() {
+			continue
+		}
+
+		asnData, err := loadASN(d.Name())
+		if err != nil {
+			continue
+		}
+
+		asnStr := fmt.Sprintf("AS%d", asnData.ASN)
+
+		for _, subnet := range append(asnData.Prefixes.IPv4, asnData.Prefixes.IPv6...) {
+			_, network, err := net.ParseCIDR(subnet)
+			if err != nil {
+				continue
+			}
+
+			entry := ASNEntry{
+				network: *network,
+				asn:     asnStr,
+				desc:    asnData.Metadata.Description,
+			}
+
+			ranger.Insert(entry)
+		}
+	}
+
+	rangerLoaded = true
+	return nil
+}
+
 func ensureASNData() error {
 
 	if _, err := os.Stat(asnDataDir); !os.IsNotExist(err) {
@@ -81,7 +139,11 @@ func ensureASNData() error {
 	if err := os.MkdirAll(asnDataDir, 0755); err != nil {
 		return fmt.Errorf("failed to create cache directory: %v", err)
 	}
-	fmt.Printf("%s[!] ASN database not found. Downloading for faster local lookups...%s\n", yellow, reset)
+	fmt.Printf(
+		"%s[!] ASN database not found. Downloading for faster local lookups...%s\n",
+		yellow,
+		reset,
+	)
 
 	zipURL := "https://github.com/ipverse/asn-ip/archive/refs/heads/master.zip"
 	zipPath := "asn-master.zip"
@@ -95,7 +157,9 @@ func ensureASNData() error {
 	size, _ := strconv.Atoi(resp.Header.Get("Content-Length"))
 	unknownSize := false
 	if size == 0 {
-		fmt.Println("\033[33mWarning: Content-Length unknown, progress will show bytes instead of percent.\033[0m")
+		fmt.Println(
+			"\033[33mWarning: Content-Length unknown, progress will show bytes instead of percent.\033[0m",
+		)
 		unknownSize = true
 	}
 
@@ -126,10 +190,22 @@ func ensureASNData() error {
 					percent = 1
 				}
 				filled := int(percent * float64(barWidth))
-				bar := fmt.Sprintf("\033[42m%s\033[0m%s", repeat(' ', filled), repeat(' ', barWidth-filled))
-				fmt.Printf("\r\033[34m[+] Starting download \033[0m[%s] \033[33m%.2f%%\033[0m", bar, percent*100)
+				bar := fmt.Sprintf(
+					"\033[42m%s\033[0m%s",
+					repeat(' ', filled),
+					repeat(' ', barWidth-filled),
+				)
+				fmt.Printf(
+					"\r\033[34m[+] Starting download \033[0m[%s] \033[33m%.2f%%\033[0m",
+					bar,
+					percent*100,
+				)
 			} else {
-				fmt.Printf("\r\033[34m[+] Starting download \033[0m[%s] %d bytes", barEmpty, downloaded)
+				fmt.Printf(
+					"\r\033[34m[+] Starting download \033[0m[%s] %d bytes",
+					barEmpty,
+					downloaded,
+				)
 			}
 		}
 
@@ -141,7 +217,10 @@ func ensureASNData() error {
 		}
 	}
 
-	fmt.Printf("\r\033[34m[+] Starting download \033[0m[\033[42m%s\033[0m] \033[33m100.00%%\033[32m Download completed!\033[0m\n", repeat(' ', barWidth))
+	fmt.Printf(
+		"\r\033[34m[+] Starting download \033[0m[\033[42m%s\033[0m] \033[33m100.00%%\033[32m Download completed!\033[0m\n",
+		repeat(' ', barWidth),
+	)
 
 	r, err := zip.OpenReader(zipPath)
 	if err != nil {
@@ -180,26 +259,40 @@ func ensureASNData() error {
 		filled := int(float64(i+1) / float64(len(r.File)) * float64(barWidth))
 		bar := fmt.Sprintf("\033[42m%s\033[0m%s", repeat(' ', filled), repeat(' ', barWidth-filled))
 		percent := float64(i+1) / float64(len(r.File)) * 100
-		fmt.Printf("\r\033[34m[+] Extracting ASN DB \033[0m[%s] \033[33m%.2f%%\033[0m", bar, percent)
+		fmt.Printf(
+			"\r\033[34m[+] Extracting ASN DB \033[0m[%s] \033[33m%.2f%%\033[0m",
+			bar,
+			percent,
+		)
 	}
 
-	fmt.Printf("\r\033[34m[+] Extracting ASN DB \033[0m[\033[42m%s\033[0m] \033[33m100.00%%\033[32m Extraction completed!\033[0m\n", repeat(' ', barWidth))
+	fmt.Printf(
+		"\r\033[34m[+] Extracting ASN DB \033[0m[\033[42m%s\033[0m] \033[33m100.00%%\033[32m Extraction completed!\033[0m\n",
+		repeat(' ', barWidth),
+	)
 
 	moved := false
-	masterDir := "asn-ip-master"
+	var masterDir string
+
 	files, _ := os.ReadDir(".")
 	for _, f := range files {
-		if f.IsDir() && strings.HasPrefix(f.Name(), "asn-ip") {
-			masterDir = f.Name()
-			break
+		if f.IsDir() && strings.Contains(f.Name(), "as") {
+			// check if it contains /as folder
+			testPath := filepath.Join(f.Name(), "as")
+			if _, err := os.Stat(testPath); err == nil {
+				masterDir = f.Name()
+				break
+			}
 		}
+	}
+
+	if masterDir == "" {
+		return fmt.Errorf("could not find extracted ASN directory")
 	}
 	asSrc := filepath.Join(masterDir, "as")
 	if _, err := os.Stat(asSrc); err == nil {
 
-		if _, err := os.Stat(asnDataDir); err == nil {
-			os.RemoveAll(asnDataDir)
-		}
+		os.RemoveAll(asnDataDir)
 		if err := os.Rename(asSrc, asnDataDir); err != nil {
 			return fmt.Errorf("failed to move ASN data: %v", err)
 		}
@@ -249,34 +342,39 @@ func lookupIP(ipStr string) (*ASNInfo, error) {
 		ip = ips[0]
 		ipStr = ip.String()
 	}
-	asnDirs, err := os.ReadDir(asnDataDir)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read asn-ip folder: %v", err)
-	}
-	for _, d := range asnDirs {
-		if !d.IsDir() {
-			continue
-		}
-		asnData, err := loadASN(d.Name())
-		if err != nil {
-			continue
-		}
-		for _, subnet := range append(asnData.Subnets.IPv4, asnData.Subnets.IPv6...) {
-			_, cidr, err := net.ParseCIDR(subnet)
-			if err != nil {
-				continue
-			}
-			if cidr.Contains(ip) {
-				return &ASNInfo{
-					Query:       ipStr,
-					IP:          ipStr,
-					ASN:         fmt.Sprintf("AS%d", asnData.ASN),
-					Description: asnData.Description,
-				}, nil
-			}
+
+	if !rangerLoaded {
+		if err := buildRanger(); err != nil {
+			return nil, err
 		}
 	}
-	return nil, fmt.Errorf("IP not found in local DB")
+
+	entries, err := ranger.ContainingNetworks(ip)
+	if err != nil || len(entries) == 0 {
+		return nil, fmt.Errorf("IP not found in local DB")
+	}
+
+	// take the most specific match
+	// best := entries[len(entries)-1].(ASNEntry)
+	var best ASNEntry
+	maxMask := -1
+
+	for _, e := range entries {
+		entry := e.(ASNEntry)
+		ones, _ := entry.network.Mask.Size()
+
+		if ones > maxMask {
+			maxMask = ones
+			best = entry
+		}
+	}
+
+	return &ASNInfo{
+		Query:       ipStr,
+		IP:          ipStr,
+		ASN:         best.asn,
+		Description: best.desc,
+	}, nil
 }
 
 func fetchURL(url string) ([]byte, error) {
@@ -492,11 +590,48 @@ func printUsage() {
 	fmt.Fprintf(os.Stderr, "%sUsage:%s\n", cyan, reset)
 	fmt.Fprintf(os.Stderr, "  ./asn_scanner [options]\n\n")
 	fmt.Fprintf(os.Stderr, "%sOptions:%s\n", cyan, reset)
-	fmt.Fprintf(os.Stderr, "  %s--ip2asn%s    %sresolve IP or domain to ASN and info%s\n", yellow, reset, green, reset)
-	fmt.Fprintf(os.Stderr, "  %s--asn2ips%s   %slist ranges for ASN or resolve domain -> ASN -> ranges%s\n", yellow, reset, green, reset)
-	fmt.Fprintf(os.Stderr, "  %s--format%s    %soutput format: text, json, csv%s\n", yellow, reset, green, reset)
-	fmt.Fprintf(os.Stderr, "  %s--output%s, %s-o%s   %soptional output file%s\n", yellow, reset, yellow, reset, green, reset)
-	fmt.Fprintf(os.Stderr, "  %s--use-api%s   %suse hackertarget API instead of local DB%s\n", yellow, reset, green, reset)
+	fmt.Fprintf(
+		os.Stderr,
+		"  %s--ip2asn%s    %sresolve IP or domain to ASN and info%s\n",
+		yellow,
+		reset,
+		green,
+		reset,
+	)
+	fmt.Fprintf(
+		os.Stderr,
+		"  %s--asn2ips%s   %slist ranges for ASN or resolve domain -> ASN -> ranges%s\n",
+		yellow,
+		reset,
+		green,
+		reset,
+	)
+	fmt.Fprintf(
+		os.Stderr,
+		"  %s--format%s    %soutput format: text, json, csv%s\n",
+		yellow,
+		reset,
+		green,
+		reset,
+	)
+	fmt.Fprintf(
+		os.Stderr,
+		"  %s--output%s, %s-o%s   %soptional output file%s\n",
+		yellow,
+		reset,
+		yellow,
+		reset,
+		green,
+		reset,
+	)
+	fmt.Fprintf(
+		os.Stderr,
+		"  %s--use-api%s   %suse hackertarget API instead of local DB%s\n",
+		yellow,
+		reset,
+		green,
+		reset,
+	)
 	fmt.Fprintf(os.Stderr, "  %s--help%s      %sshow this help%s\n", yellow, reset, green, reset)
 }
 
@@ -563,8 +698,8 @@ func main() {
 			info = &ASNInfo{
 				Query:       asn2ipsFlag,
 				ASN:         fmt.Sprintf("AS%d", asnData.ASN),
-				Description: asnData.Description,
-				Prefixes:    append(asnData.Subnets.IPv4, asnData.Subnets.IPv6...),
+				Description: asnData.Metadata.Description,
+				Prefixes:    append(asnData.Prefixes.IPv4, asnData.Prefixes.IPv6...),
 			}
 		}
 	}
@@ -578,8 +713,15 @@ func main() {
 	case "text":
 		printText(info, showPrefixes)
 		if outFile != "" {
-			data, _ := json.MarshalIndent(info, "", "  ")
-			_ = os.WriteFile(outFile, data, 0644)
+			data, err := json.MarshalIndent(info, "", "  ")
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "%sError marshaling JSON:%s %v\n", red, reset, err)
+				os.Exit(1)
+			}
+			if err := os.WriteFile(outFile, data, 0644); err != nil {
+				fmt.Fprintf(os.Stderr, "%sError writing file:%s %v\n", red, reset, err)
+				os.Exit(1)
+			}
 		}
 	case "json":
 		if err := printJSON(info, outFile); err != nil {
