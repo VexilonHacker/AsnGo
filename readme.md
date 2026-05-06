@@ -21,7 +21,7 @@
 ```bash
 git clone https://github.com/VexilonHacker/asngo
 cd asngo
-go build -o asn_scanner main.go
+go build -o AsnGo main.go
 ```
 
 ---
@@ -30,20 +30,20 @@ go build -o asn_scanner main.go
 
 ```bash
 # Resolve an IP -> ASN
-./asn_scanner --ip2asn 8.8.8.8
+./AsnGo --ip2asn 8.8.8.8
 
 # Resolve an domain -> ASN 
-./asn_scanner --ip2asn github.com 
+./AsnGo --ip2asn github.com 
 ```
 
 ## Output formats
 
 ```bash
 # JSON output to file
-./asn_scanner --ip2asn 8.8.8.8 --format json --output result.json
+./AsnGo --ip2asn 8.8.8.8 --format json --output result.json
 
 # CSV output of all prefixes for an ASN
-./asn_scanner --asn2ips AS15169 --format csv --output prefixes.csv
+./AsnGo --asn2ips AS15169 --format csv --output prefixes.csv
 ```
 ## Help menu 
 ``` 
@@ -65,7 +65,7 @@ d88P     888  88888P' 888  888  "Y88888  "Y88P"
 [+] Scan result follows below
 
 Usage:
-  ./asn_scanner [options]
+  ./AsnGo [options]
 
 Options:
   --ip2asn    resolve IP or domain to ASN and info
